@@ -1,0 +1,10 @@
+target-version = "py39"
+line-length = 100
+extend-exclude = ["vendor", ".venv", ".dftw"]
+
+[lint]
+extend-select = ["I"]
+
+[lint.per-file-ignores]
+"repo/modifiers/**" = ["F403", "F405", "F821"]
+"repo/spack_repo/**" = ["F403", "F405", "F821"]

@@ -1,0 +1,10 @@
+stack:
+  dftracer: master
+  dftracer-utils: master
+  pydftracer: master
+workloads:
+  unet3d:
+    repo: https://github.com/mlcommons/training
+    ref: master
+    subdir: retired_benchmarks/unet3d/pytorch
+    patch: repo/spack_repo/dftw/packages/unet3d/dftracer.patch

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DFTW="$ROOT/.venv/bin/dftw"
+if [[ ! -x "$DFTW" ]]; then
+  echo "dftw not installed: run $ROOT/bootstrap.sh" >&2
+  exit 1
+fi
+export DFTW_ROOT="$ROOT"
+exec "$DFTW" "$@"

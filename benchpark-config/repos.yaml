@@ -1,0 +1,14 @@
+repos:
+  experiments:
+    - ../vendor/benchpark/experiments
+    - ../vendor/benchpark/experiments/test
+    - ../repo/experiments
+  systems:
+    - ../vendor/benchpark/systems
+    - ../repo/systems
+  applications:
+    - ../vendor/benchpark/repos/ramble_applications
+    - ../repo/applications
+  packages:
+    - ../vendor/benchpark/repos/spack_repo/benchpark
+    - ../repo/spack_repo/dftw

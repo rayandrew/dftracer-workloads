@@ -1,0 +1,22 @@
+[project]
+name = "dftw"
+version = "0.0.1"
+description = "Orchestration CLI for dftracer-workloads"
+requires-python = ">=3.9"
+dependencies = ["typer>=0.12", "pyyaml>=6"]
+
+[project.scripts]
+dftw = "dftw.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
