@@ -38,6 +38,14 @@ else
   echo "$WANT" >"$STAMP"
 fi
 
+WORKDIR="${DFTW_WORK:-$ROOT/.dftw/work}"
+BENCHPARK_HOME="${DFTW_BENCHPARK_HOME:-$WORKDIR/.benchpark}"
+echo ">> benchpark bootstrap home: $BENCHPARK_HOME"
+cat >"$ROOT/benchpark-config/bootstrap.yaml" <<YAML
+bootstrap:
+  location: $BENCHPARK_HOME
+YAML
+
 echo ">> bootstrapping benchpark (ramble + spack, one-time)"
 "$ROOT/vendor/benchpark/bin/benchpark" --config "$ROOT/benchpark-config" bootstrap
 

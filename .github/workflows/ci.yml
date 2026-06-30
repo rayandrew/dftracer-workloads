@@ -1,0 +1,93 @@
+name: ci
+on:
+  push:
+    branches: [main, feat/*, fix/*, chore/*]
+  pull_request:
+    branches: [main, feat/*, fix/*, chore/*]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff mypy
+      - name: ruff
+        run: ruff check orchestration/src repo/modifiers repo/applications repo/experiments tests
+      - name: mypy
+        run: mypy --config-file orchestration/pyproject.toml orchestration/src/dftw
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r docs/requirements.txt
+      - name: sphinx build (warnings are errors)
+        run: python -m sphinx -b html -W --keep-going docs/source docs/_build/html
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: dftracer_summary unit tests
+        run: pytest tests -q
+  render:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache benchpark bootstrap (ramble + spack) and venv
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            .dftw/work/.benchpark
+          key: bootstrap-${{ runner.os }}-${{ hashFiles('vendor/benchpark/requirements.txt', 'orchestration/pyproject.toml', 'bootstrap.sh') }}
+      - name: Bootstrap (benchpark + ramble + spack + dftw)
+        run: ./bootstrap.sh
+      - name: Render unet3d definitions
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/bin:$PATH"
+
+          # Loads experiment.py + application.py (+ the dftracer modifier's modes).
+          dftw info "unet3d +rocm package_manager=spack-pip"
+
+          # Renders ramble.yaml from the definitions (no concretize, no build).
+          SYS="$RUNNER_TEMP/sys"
+          dftw benchpark system init --dest="$SYS" llnl-elcapitan cluster=tuolumne
+          dftw benchpark experiment init --dest=unet3d "$SYS" unet3d +rocm package_manager=spack-pip
+      - name: Assert unet3d + dftracer wiring is present
+        run: |
+          set -euo pipefail
+          RY="$(find "$RUNNER_TEMP/sys" -name ramble.yaml | head -1)"
+          test -n "$RY" || { echo "ramble.yaml not rendered"; exit 1; }
+          grep -q 'name: dftracer' "$RY" || { echo "dftracer modifier not wired"; exit 1; }
+          grep -q 'unet3d' "$RY"        || { echo "unet3d not in ramble.yaml"; exit 1; }
+          echo "render check passed"
+  all:
+    needs: [lint, docs, unit, render]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Status summary
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "one or more jobs failed"; exit 1
+          fi
+          echo "all jobs passed"

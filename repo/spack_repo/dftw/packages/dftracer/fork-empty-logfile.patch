@@ -1,0 +1,52 @@
+diff --git a/src/dftracer/core/common/dftracer_main.cpp b/src/dftracer/core/common/dftracer_main.cpp
+index 2e08861..e117a16 100644
+--- a/src/dftracer/core/common/dftracer_main.cpp
++++ b/src/dftracer/core/common/dftracer_main.cpp
+@@ -188,15 +188,18 @@ void dftracer::DFTracerCore::reinitialize() {
+   is_initialized = false;
+   if (this->log_file_prefix.empty()) {
+     const char* log_file_env = getenv("DFTRACER_LOG_FILE");
+-    if (log_file_env != nullptr) {
++    if (log_file_env != nullptr && log_file_env[0] != '\0') {
+       this->log_file_prefix = std::string(log_file_env);
++    } else if (!conf->log_file.empty()) {
++      this->log_file_prefix = conf->log_file;
+     } else {
+       DFTRACER_LOG_ERROR(DFTRACER_UNDEFINED_LOG_FILE_MSG);
+       throw std::runtime_error(DFTRACER_UNDEFINED_LOG_FILE_CODE);
+     }
+   }
+   conf->log_file = this->log_file_prefix;
+-  setenv("DFTRACER_LOG_FILE", this->log_file_prefix.c_str(), 1);
++  if (!this->log_file_prefix.empty())
++    setenv("DFTRACER_LOG_FILE", this->log_file_prefix.c_str(), 1);
+   if (this->data_dirs.empty()) {
+     const char* data_dirs_env = getenv("DFTRACER_DATA_DIR");
+     if (data_dirs_env != nullptr) {
+@@ -303,8 +306,11 @@ void dftracer::DFTracerCore::initialize(bool _bind, const char* _log_file,
+           extension += ".gz";
+         }
+         size_t ext_pos = this->log_file.find_last_of(".");
+-        if (ext_pos != std::string::npos) {
+-          this->log_file = this->log_file.substr(0, ext_pos);
++        size_t sep_pos = this->log_file.find_last_of("/\\");
++        // Only strip an extension that lives in the basename; a '.' in a parent
++        // directory (e.g. a hidden ".dftw" dir) must not truncate the path.
++        if (ext_pos != std::string::npos &&
++            (sep_pos == std::string::npos || ext_pos > sep_pos)) {
+           this->log_file = this->log_file.substr(0, ext_pos);
+         }
+         this->log_file_prefix = this->log_file;
+@@ -404,8 +410,10 @@ void dftracer::DFTracerCore::initialize(bool _bind, const char* _log_file,
+       }
+ #endif
+     }
+-    setenv("DFTRACER_LOG_FILE", this->log_file_prefix.c_str(), 1);
+-    setenv("DFTRACER_DATA_DIR", this->data_dirs.c_str(), 1);
++    if (!this->log_file_prefix.empty())
++      setenv("DFTRACER_LOG_FILE", this->log_file_prefix.c_str(), 1);
++    if (!this->data_dirs.empty())
++      setenv("DFTRACER_DATA_DIR", this->data_dirs.c_str(), 1);
+     DFTRACER_LOG_PRINT(
+         "DFTracerCore::initialize _bind:%d _log_file:%s _data_dirs:%s "
+         "_process_id:%d\n",

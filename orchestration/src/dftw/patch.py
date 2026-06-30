@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,13 +11,32 @@ if TYPE_CHECKING:
     from .config import Config
 
 
+def package_dir(cfg: Config, name: str) -> Path:
+    return cfg.root / "repo" / "spack_repo" / "dftw" / "packages" / name
+
+
+def pkg_info(cfg: Config, name: str) -> dict[str, str]:
+    """The source-of-truth for a workload's source"""
+    pkg = package_dir(cfg, name) / "package.py"
+    if not pkg.exists():
+        raise SystemExit(f"no spack package for {name}: {pkg}")
+    text = pkg.read_text()
+
+    def grab(pattern: str, default: Optional[str] = None) -> Optional[str]:
+        m = re.search(pattern, text)
+        return m.group(1) if m else default
+
+    repo = grab(r"""git\s*=\s*['"]([^'"]+)['"]""")
+    commit = grab(r"""commit\s*=\s*['"]([0-9a-fA-F]{7,40})['"]""")
+    if not (repo and commit):
+        raise SystemExit(f"cannot parse git/commit from {pkg}")
+    subdir = grab(r"""git_sparse_paths\s*=\s*\[\s*['"]([^'"]+)['"]""", "") or ""
+    patch = grab(r"""patch\(\s*['"]([^'"]+)['"]""", "dftracer.patch") or "dftracer.patch"
+    return {"repo": repo, "commit": commit, "subdir": subdir, "patch": patch}
+
+
 def dev_dir(cfg: Config, name: str) -> Path:
     return cfg.root / ".dftw" / "dev" / name
-
-
-def patch_path(cfg: Config, name: str, wl: dict[str, Any]) -> Path:
-    rel = wl.get("patch", f"repo/spack_repo/dftw/packages/{name}/dftracer.patch")
-    return cfg.root / rel
 
 
 def _git(cwd: Path, *args: str, **kw: Any) -> "subprocess.CompletedProcess[Any]":
@@ -24,38 +44,42 @@ def _git(cwd: Path, *args: str, **kw: Any) -> "subprocess.CompletedProcess[Any]"
 
 
 def edit(cfg: Config, name: str, editor: Optional[str] = None) -> None:
-    wl = cfg.workload(name)
+    info = pkg_info(cfg, name)
     dev = dev_dir(cfg, name)
     if not dev.exists():
         dev.parent.mkdir(parents=True, exist_ok=True)
-        _git(cfg.root, "clone", wl["repo"], str(dev))
+        _git(cfg.root, "clone", info["repo"], str(dev))
     _git(dev, "fetch", "--all", "--tags")
-    _git(dev, "checkout", "--force", wl["ref"])
-    patch = patch_path(cfg, name, wl)
+    _git(dev, "checkout", "--force", info["commit"])
+    patch = package_dir(cfg, name) / info["patch"]
     if patch.exists() and patch.stat().st_size:
         _git(dev, "apply", "--3way", str(patch))
-    _open_editor(dev, editor)
+    _open_editor(dev / info["subdir"], editor)
 
 
 def save(cfg: Config, name: str) -> Path:
-    wl = cfg.workload(name)
+    info = pkg_info(cfg, name)
     dev = dev_dir(cfg, name)
     if not dev.exists():
         raise SystemExit(f"no dev checkout for {name}: run `dftw patch edit {name}`")
     diff = subprocess.run(
-        ["git", "diff", wl["ref"]], cwd=str(dev), check=True, capture_output=True, text=True
+        ["git", "diff", info["commit"], "--", info["subdir"] or "."],
+        cwd=str(dev),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
-    patch = patch_path(cfg, name, wl)
-    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch = package_dir(cfg, name) / info["patch"]
     patch.write_text(diff)
     return patch
 
 
 def status(cfg: Config, name: str) -> None:
+    info = pkg_info(cfg, name)
     dev = dev_dir(cfg, name)
     if not dev.exists():
         raise SystemExit(f"no dev checkout for {name}")
-    _git(dev, "status", "--short")
+    _git(dev, "status", "--short", "--", info["subdir"] or ".")
 
 
 def reset(cfg: Config, name: str) -> None:

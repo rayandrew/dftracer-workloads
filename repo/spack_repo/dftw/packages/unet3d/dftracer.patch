@@ -1,0 +1,315 @@
+diff --git a/retired_benchmarks/unet3d/pytorch/data_loading/data_loader.py b/retired_benchmarks/unet3d/pytorch/data_loading/data_loader.py
+index c4c80b5..5247f6f 100644
+--- a/retired_benchmarks/unet3d/pytorch/data_loading/data_loader.py
++++ b/retired_benchmarks/unet3d/pytorch/data_loading/data_loader.py
+@@ -9,6 +9,8 @@ from torch.utils.data.distributed import DistributedSampler
+ from data_loading.pytorch_loader import PytVal, PytTrain
+ from runtime.logging import mllog_event
+
++from dftracer.python import ai
++
+
+ def list_files_with_pattern(path, files_pattern):
+     data = sorted(glob.glob(os.path.join(path, files_pattern)))
+@@ -69,6 +71,10 @@ class SyntheticDataset(Dataset):
+             y_shape = (channels_out,) + shape if layout == "NCDHW" else shape + (channels_out,)
+             self.y = torch.rand((32, *y_shape), dtype=torch.float32, device=device, requires_grad=False)
+
++    @ai.data.derive("worker.init")
++    def worker_init(self, worker_id):
++        pass
++
+     def __len__(self):
+         return 64
+
+@@ -98,6 +104,7 @@ def get_data_loaders(flags, num_shards, global_rank):
+                                   shuffle=not flags.benchmark and train_sampler is None,
+                                   sampler=train_sampler,
+                                   num_workers=flags.num_workers,
++                                  worker_init_fn=train_dataset.worker_init,
+                                   pin_memory=True,
+                                   drop_last=True)
+     val_dataloader = DataLoader(val_dataset,
+@@ -105,6 +112,7 @@ def get_data_loaders(flags, num_shards, global_rank):
+                                 shuffle=not flags.benchmark and val_sampler is None,
+                                 sampler=val_sampler,
+                                 num_workers=flags.num_workers,
++                                worker_init_fn=val_dataset.worker_init,
+                                 pin_memory=True,
+                                 drop_last=False)
+
+diff --git a/retired_benchmarks/unet3d/pytorch/data_loading/pytorch_loader.py b/retired_benchmarks/unet3d/pytorch/data_loading/pytorch_loader.py
+index bb71d32..b53521e 100644
+--- a/retired_benchmarks/unet3d/pytorch/data_loading/pytorch_loader.py
++++ b/retired_benchmarks/unet3d/pytorch/data_loading/pytorch_loader.py
+@@ -4,6 +4,8 @@ import scipy.ndimage
+ from torch.utils.data import Dataset
+ from torchvision import transforms
+
++from dftracer.python import ai
++
+
+ def get_train_transforms():
+     rand_flip = RandFlip()
+@@ -145,10 +147,16 @@ class PytTrain(Dataset):
+     def __len__(self):
+         return len(self.images)
+
++    @ai.data.derive("worker.init")
++    def worker_init(self, worker_id):
++        pass
++
++    @ai.data.item
+     def __getitem__(self, idx):
+         data = {"image": np.load(self.images[idx]), "label": np.load(self.labels[idx])}
+-        data = self.rand_crop(data)
+-        data = self.train_transforms(data)
++        with ai.data.preprocess:
++            data = self.rand_crop(data)
++            data = self.train_transforms(data)
+         return data["image"], data["label"]
+
+
+@@ -159,6 +167,11 @@ class PytVal(Dataset):
+     def __len__(self):
+         return len(self.images)
+
++    @ai.data.derive("worker.init")
++    def worker_init(self, worker_id):
++        pass
++
++    @ai.data.item
+     def __getitem__(self, idx):
+         return np.load(self.images[idx]), np.load(self.labels[idx])
+
+diff --git a/retired_benchmarks/unet3d/pytorch/main.py b/retired_benchmarks/unet3d/pytorch/main.py
+index c3ab0a2..4c107e8 100644
+--- a/retired_benchmarks/unet3d/pytorch/main.py
++++ b/retired_benchmarks/unet3d/pytorch/main.py
+@@ -16,23 +16,37 @@ from runtime.distributed_utils import seed_everything, setup_seeds
+ from runtime.logging import get_dllogger, mllog_start, mllog_end, mllog_event, mlperf_submission_log, mlperf_run_param_log
+ from runtime.callbacks import get_callbacks
+
++from dftracer.python import dftracer, ai
++
+ DATASET_SIZE = 168
+
+
+-def main():
+-    mllog.config(filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unet3d.log'))
+-    mllog.config(filename=os.path.join("/results", 'unet3d.log'))
+-    mllogger = mllog.get_mllogger()
+-    mllogger.logger.propagate = False
+-    mllog_start(key=constants.INIT_START)
++def _bootstrap_dist_env():
++    """Populate torch env:// vars from the MPI launcher (flux PMIx / srun / mpirun).
+
+-    flags = PARSER.parse_args()
+-    dllogger = get_dllogger(flags)
+-    local_rank = flags.local_rank
+-    device = get_device(local_rank)
+-    is_distributed = init_distributed()
+-    world_size = get_world_size()
+-    local_rank = get_rank()
++    No-op if WORLD_SIZE is already set (e.g. torchrun). mpi4py is bootstrapped by
++    flux's PMIx, so rank/size/local_rank and the rank-0 host are available without
++    a hand-rolled MASTER_ADDR exchange.
++    """
++    if os.environ.get("WORLD_SIZE"):
++        return
++    try:
++        from mpi4py import MPI
++    except ImportError:
++        return
++    comm = MPI.COMM_WORLD
++    rank, size = comm.Get_rank(), comm.Get_size()
++    local_rank = comm.Split_type(MPI.COMM_TYPE_SHARED).Get_rank()
++    master = comm.bcast(MPI.Get_processor_name() if rank == 0 else None, root=0)
++    os.environ.setdefault("WORLD_SIZE", str(size))
++    os.environ.setdefault("RANK", str(rank))
++    os.environ.setdefault("LOCAL_RANK", str(local_rank))
++    os.environ.setdefault("MASTER_ADDR", master)
++    os.environ.setdefault("MASTER_PORT", os.environ.get("DFTW_MASTER_PORT", "29500"))
++
++
++@ai
++def _main(flags, dllogger, device, is_distributed, world_size, local_rank):
+     worker_seeds, shuffling_seeds = setup_seeds(flags.seed, flags.epochs, device)
+     worker_seed = worker_seeds[local_rank]
+     seed_everything(worker_seed)
+@@ -77,5 +91,35 @@ def main():
+         pass
+
+
++def main():
++    _bootstrap_dist_env()
++    mllog.config(filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unet3d.log'))
++    mllog.config(filename=os.path.join(os.environ.get("DFTW_RESULTS_DIR", "."), 'unet3d.log'))
++    mllogger = mllog.get_mllogger()
++    mllogger.logger.propagate = False
++    mllog_start(key=constants.INIT_START)
++
++    flags = PARSER.parse_args()
++    dllogger = get_dllogger(flags)
++    local_rank = flags.local_rank
++    device = get_device(local_rank)
++    is_distributed = init_distributed()
++    world_size = get_world_size()
++    local_rank = get_rank()
++    # Per-rank logfile: the rank lands in both the rank trace and (via the inherited
++    # prefix) the forked-worker traces, and initialize_log creates the trace dir. Requires
++    # the DFTracer fix so a '.' in a parent dir (e.g. ".dftw") doesn't truncate the path.
++    _dft_base = os.environ.get(
++        "DFTRACER_LOG_FILE", os.path.join(os.environ.get("DFTW_RESULTS_DIR", "."), "trace")
++    )
++    dft = dftracer.initialize_log(
++        logfile=f"{_dft_base}-{get_rank()}-of-{world_size}.pfw",
++        process_id=get_rank(),
++        data_dir=os.path.abspath(flags.data_dir),
++    )
++    _main(flags, dllogger, device, is_distributed, world_size, local_rank)
++    dft.finalize()
++
++
+ if __name__ == '__main__':
+     main()
+diff --git a/retired_benchmarks/unet3d/pytorch/runtime/callbacks.py b/retired_benchmarks/unet3d/pytorch/runtime/callbacks.py
+index 1321015..cfb911a 100644
+--- a/retired_benchmarks/unet3d/pytorch/runtime/callbacks.py
++++ b/retired_benchmarks/unet3d/pytorch/runtime/callbacks.py
+@@ -4,6 +4,8 @@ import copy
+ import torch
+ import numpy as np
+
++from dftracer.python import ai
++
+
+ def process_performance_stats(timestamps, batch_size, mode):
+     """ Get confidence intervals
+@@ -143,5 +145,6 @@ class CheckpointCallback(BaseCallback):
+                                 'best_optimizer_state_dict': copy.deepcopy(optimizer.state_dict()),
+                                 **metrics}
+
++    @ai.checkpoint.capture
+     def on_fit_end(self, *args, **kwargs):
+         torch.save({**self._last_state, **self._best_state, "seed": self._seed}, self._path)
+diff --git a/retired_benchmarks/unet3d/pytorch/runtime/inference.py b/retired_benchmarks/unet3d/pytorch/runtime/inference.py
+index da60952..8f5cae0 100644
+--- a/retired_benchmarks/unet3d/pytorch/runtime/inference.py
++++ b/retired_benchmarks/unet3d/pytorch/runtime/inference.py
+@@ -8,7 +8,10 @@ from torch.cuda.amp import autocast
+
+ from runtime.distributed_utils import reduce_tensor, get_world_size, get_rank
+
++from dftracer.python import ai
+
++
++@ai.pipeline.test
+ def evaluate(flags, model, loader, loss_fn, score_fn, device, epoch=0, is_distributed=False):
+     rank = get_rank()
+     world_size = get_world_size()
+@@ -30,7 +33,8 @@ def evaluate(flags, model, loader, loss_fn, score_fn, device, epoch=0, is_distri
+     with torch.no_grad():
+         for i, batch in enumerate(tqdm(loader, disable=(rank != 0) or not flags.verbose)):
+             image, label = batch
+-            image, label = image.to(device), label.to(device)
++            with ai.device.transfer:
++                image, label = image.to(device), label.to(device)
+             if image.numel() == 0:
+                 continue
+             with autocast(enabled=flags.amp):
+diff --git a/retired_benchmarks/unet3d/pytorch/runtime/training.py b/retired_benchmarks/unet3d/pytorch/runtime/training.py
+index 030adde..561a129 100644
+--- a/retired_benchmarks/unet3d/pytorch/runtime/training.py
++++ b/retired_benchmarks/unet3d/pytorch/runtime/training.py
+@@ -8,6 +8,8 @@ from runtime.distributed_utils import get_rank, reduce_tensor, get_world_size
+ from runtime.inference import evaluate
+ from runtime.logging import mllog_event, mllog_start, mllog_end, CONSTANTS
+
++from dftracer.python import ai
++
+
+ def get_optimizer(params, flags):
+     if flags.optimizer == "adam":
+@@ -30,6 +32,7 @@ def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
+         param_group['lr'] = init_lr + (lr - init_lr) * scale
+
+
++@ai.pipeline.train
+ def train(flags, model, train_loader, val_loader, loss_fn, score_fn, device, callbacks, is_distributed):
+     rank = get_rank()
+     world_size = get_world_size()
+@@ -56,7 +59,8 @@ def train(flags, model, train_loader, val_loader, loss_fn, score_fn, device, cal
+     model.train()
+     for callback in callbacks:
+         callback.on_fit_start()
+-    for epoch in range(1, flags.epochs + 1):
++    for epoch in ai.pipeline.epoch.iter(range(1, flags.epochs + 1), include_iter=False):
++        ai.update(epoch=epoch - 1)
+         cumulative_loss = []
+         if epoch <= flags.lr_warmup_epochs and flags.lr_warmup_epochs > 0:
+             lr_warmup(optimizer, flags.init_learning_rate, flags.learning_rate, epoch, flags.lr_warmup_epochs)
+@@ -69,33 +73,41 @@ def train(flags, model, train_loader, val_loader, loss_fn, score_fn, device, cal
+
+         loss_value = None
+         optimizer.zero_grad()
+-        for iteration, batch in enumerate(tqdm(train_loader, disable=(rank != 0) or not flags.verbose)):
++        for iteration, batch in ai.dataloader.fetch.iter(
++                enumerate(tqdm(train_loader, disable=(rank != 0) or not flags.verbose))):
++            ai.update(epoch=epoch, step=iteration + 1)
+             image, label = batch
+-            image, label = image.to(device), label.to(device)
+-            for callback in callbacks:
+-                callback.on_batch_start()
+-
+-            with autocast(enabled=flags.amp):
+-                output = model(image)
+-                loss_value = loss_fn(output, label)
+-                loss_value /= flags.ga_steps
+-
+-            if flags.amp:
+-                scaler.scale(loss_value).backward()
+-            else:
+-                loss_value.backward()
+-
+-            if (iteration + 1) % flags.ga_steps == 0:
++            ai.compute.start()
++            with ai.device.transfer:
++                image, label = image.to(device), label.to(device)
++            with ai.compute.forward:
++                for callback in callbacks:
++                    callback.on_batch_start()
++
++                with autocast(enabled=flags.amp):
++                    output = model(image)
++                    loss_value = loss_fn(output, label)
++                    loss_value /= flags.ga_steps
++
++            with ai.compute.backward:
+                 if flags.amp:
+-                    scaler.step(optimizer)
+-                    scaler.update()
++                    scaler.scale(loss_value).backward()
+                 else:
+-                    optimizer.step()
++                    loss_value.backward()
++
++                if (iteration + 1) % flags.ga_steps == 0:
++                    if flags.amp:
++                        scaler.step(optimizer)
++                        scaler.update()
++                    else:
++                        optimizer.step()
+
+-                optimizer.zero_grad()
++                    optimizer.zero_grad()
+
+-            loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy()
+-            cumulative_loss.append(loss_value)
++            with ai.comm.all_reduce:
++                loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy()
++                cumulative_loss.append(loss_value)
++            ai.compute.stop()
+
+         mllog_end(key=CONSTANTS.EPOCH_STOP, sync=False,
+                   metadata={CONSTANTS.EPOCH_NUM: epoch, 'current_lr': optimizer.param_groups[0]['lr']})

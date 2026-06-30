@@ -208,3 +208,13 @@ __marimo__/
 
 # dftw
 .dftw/
+# repo/lib holds our shared benchpark objects (dftw_bench); un-hide it from the generic `lib/`
+# rule (only the dir -- __pycache__/*.pyc stay ignored via the rules above)
+!repo/lib/
+
+# generated: site-specific bootstrap location
+benchpark-config/bootstrap.yaml
+
+*.out
+*.core
+PR.md

@@ -1,0 +1,19 @@
+params:
+  cases: "168"
+stages:
+  - name: download
+    produces: "{WORK}/raw/kits19/.imaging-complete"
+    run: "bash {DATADIR}/01-download.sh {WORK}/raw"
+    instructions: |
+      KITS19 imaging download did not complete. To finish it by hand:
+        git clone https://github.com/neheller/kits19 {WORK}/raw/kits19   # if missing
+        cd {WORK}/raw/kits19 && python3 -m pip install -r requirements.txt
+        python3 -m starter_code.get_imaging && touch .imaging-complete
+      get_imaging is resumable (skips cases already fetched). Then re-run
+      `dftw data prepare unet3d`.
+  - name: preprocess
+    produces: "{DEST}/.preprocessed"
+    run: "python3 {DATADIR}/02-preprocess.py --data_dir {WORK}/raw/kits19/data --results_dir {DEST} --mode preprocess"
+  - name: scale
+    produces: "{DEST}/.scaled-{cases}"
+    run: "python3 {DATADIR}/03-scale.py --dir {DEST} --total {cases} --marker {DEST}/.scaled-{cases}"

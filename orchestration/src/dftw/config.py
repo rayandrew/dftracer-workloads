@@ -2,46 +2,27 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
-import yaml
-
-CONFIG_NAME = "dftw.yaml"
-STACK_PACKAGES = ["dftracer", "dftracer-utils", "pydftracer"]
+# Unambiguous marker for "this is the dftw repo": its out-of-tree benchpark objects.
+_MARKER = Path("repo") / "spack_repo"
 
 
 def repo_root(start: Optional[Union[Path, str]] = None) -> Path:
+    """Locate the repo root: DFTW_ROOT (set by bin/dftw) else walk up for the marker."""
     env = os.environ.get("DFTW_ROOT")
-    if env and (Path(env) / CONFIG_NAME).exists():
+    if env and (Path(env) / _MARKER).exists():
         return Path(env).resolve()
     p = Path(start or Path.cwd()).resolve()
     for d in [p, *p.parents]:
-        if (d / CONFIG_NAME).exists():
+        if (d / _MARKER).exists():
             return d
-    raise SystemExit(f"{CONFIG_NAME} not found from {p}")
+    raise SystemExit("not inside a dftw repo (set DFTW_ROOT or run from the repo tree)")
 
 
 class Config:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.path = root / CONFIG_NAME
-        self.data: dict[str, Any] = yaml.safe_load(self.path.read_text()) or {}
-
-    @property
-    def stack(self) -> dict[str, Any]:
-        return self.data.setdefault("stack", {})
-
-    @property
-    def workloads(self) -> dict[str, Any]:
-        return self.data.setdefault("workloads", {})
-
-    def workload(self, name: str) -> dict[str, Any]:
-        if name not in self.workloads:
-            raise SystemExit(f"unknown workload: {name}")
-        return self.workloads[name]
-
-    def save(self) -> None:
-        self.path.write_text(yaml.safe_dump(self.data, sort_keys=False))
 
 
 def load(start: Optional[Union[Path, str]] = None) -> Config:

@@ -1,7 +1,5 @@
 repos:
   experiments:
-    - ../vendor/benchpark/experiments
-    - ../vendor/benchpark/experiments/test
     - ../repo/experiments
   systems:
     - ../vendor/benchpark/systems
